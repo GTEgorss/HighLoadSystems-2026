@@ -1,0 +1,92 @@
+name: ddia-hw-1
+
+services:
+  app:
+    build: .
+    image: ddia-hw-1-app:local
+    command: [server]
+    ports: ['127.0.0.1:8080:8080']
+    environment:
+      DEPLOYMENT: items-demo
+      DATACENTER: dc-a
+      POD: pod-1
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:8080/healthz']
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.136.0
+    command: [-promscrape.config=/etc/victoriametrics/scrape.yaml, -retentionPeriod=7d]
+    ports: ['127.0.0.1:8428:8428']
+    volumes:
+      - ./config/scrape.yaml:/etc/victoriametrics/scrape.yaml:ro
+      - metrics-data:/victoria-metrics-data
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:8428/health']
+      interval: 3s
+      timeout: 2s
+      retries: 20
+
+  init-secrets:
+    build: .
+    image: ddia-hw-1-app:local
+    user: '0:0'
+    command: [setup, -init]
+    volumes: [admin-secret:/run/admin]
+
+  grafana:
+    image: grafana/grafana:12.3.6
+    ports: ['127.0.0.1:3000:3000']
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/admin/password
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_AUTH_ANONYMOUS_ENABLED: 'true'
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_ANALYTICS_REPORTING_ENABLED: 'false'
+    volumes:
+      - admin-secret:/run/admin:ro
+      - grafana-data:/var/lib/grafana
+      - ./config/datasource.yaml:/etc/grafana/provisioning/datasources/vm.yaml:ro
+    depends_on:
+      init-secrets: {condition: service_completed_successfully}
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:3000/api/health']
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  bootstrap:
+    build: .
+    image: ddia-hw-1-app:local
+    user: '0:0'
+    command: [setup]
+    volumes:
+      - admin-secret:/run/admin:ro
+      - generator-token:/run/token
+    depends_on:
+      grafana: {condition: service_healthy}
+
+  generate:
+    build: .
+    image: ddia-hw-1-app:local
+    command: [generate]
+    volumes: [generator-token:/run/token:ro]
+    depends_on:
+      bootstrap: {condition: service_completed_successfully}
+      app: {condition: service_healthy}
+
+  load:
+    build: .
+    image: ddia-hw-1-app:local
+    command: [load]
+    depends_on:
+      generate: {condition: service_completed_successfully}
+      victoriametrics: {condition: service_healthy}
+
+volumes:
+  admin-secret:
+  generator-token:
+  grafana-data:
+  metrics-data:
