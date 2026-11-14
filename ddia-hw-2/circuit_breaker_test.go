@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -34,6 +35,21 @@ func TestCircuitBreakerRecoveryAfterCooldown(t *testing.T) {
 	if s.calls() != 2 || s.gaps()[0] < c.Cooldown {
 		t.Fatalf("calls=%d gaps=%v", s.calls(), s.gaps())
 	}
+}
+
+func TestCircuitBreakerWithBackoffTracksEachAttempt(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := CircuitBreaker{Strategy: Backoff{InitialDelay: 10 * time.Millisecond},
+			Window: 1, ErrorThreshold: .5, Cooldown: 100 * time.Millisecond}
+		first, second := sequence(503), sequence(503, 200)
+		b := limits()
+		b.MaxRequests = 4
+		response, err := c.Do(context.Background(), []Sender{first, second}, b)
+		requireSuccess(t, response, err)
+		if first.calls() != 2 || second.calls() != 2 || first.gaps()[0] < c.Cooldown || second.gaps()[0] < c.Cooldown {
+			t.Fatalf("calls=%d,%d gaps=%v,%v", first.calls(), second.calls(), first.gaps(), second.gaps())
+		}
+	})
 }
 
 func TestCircuitBreakerAllOpenConsumesLatencyNotRequests(t *testing.T) {

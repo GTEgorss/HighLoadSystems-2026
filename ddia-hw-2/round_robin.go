@@ -23,13 +23,14 @@ func rotate(ctx context.Context, senders []Sender, b Budget, strategy Client, br
 		strategy = Default{}
 	}
 	pool := rotation{nodes: make([]node, len(senders)), breaker: breaker}
-	return retry(ctx, state, func() (Response, error) {
+	state.next = func(ctx context.Context) (target, error) {
 		i, err := pool.choose(ctx)
 		if err != nil {
-			return Response{}, err
+			return target{}, err
 		}
-		response, err := strategy.Do(ctx, senders[i], b)
-		pool.record(i, err != nil)
-		return response, err
+		return target{sender: senders[i], done: func(failed bool) { pool.record(i, failed) }}, nil
+	}
+	return retry(ctx, state, func() (Response, error) {
+		return strategy.Do(ctx, senders[0], b)
 	}, nil)
 }

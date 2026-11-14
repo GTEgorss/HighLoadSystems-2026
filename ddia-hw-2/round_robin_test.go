@@ -2,9 +2,11 @@ package resilience
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -50,14 +52,15 @@ func TestRoundRobinMovesAfterTimeout(t *testing.T) {
 func TestRoundRobinComposesBackoffWithSharedBudget(t *testing.T) {
 	c := RoundRobin{Strategy: Backoff{InitialDelay: 10 * time.Millisecond}}
 	first, second := sequence(503, 200), sequence(200)
+	start := time.Now()
 	response, err := c.Do(context.Background(), []Sender{first, second}, limits())
 	requireSuccess(t, response, err)
-	if first.calls() != 2 || second.calls() != 0 || first.gaps()[0] < 10*time.Millisecond {
-		t.Fatal("inner backoff was not applied")
+	if first.calls() != 1 || second.calls() != 1 || time.Since(start) < 10*time.Millisecond {
+		t.Fatal("backoff or rotation was not applied")
 	}
 	b := limits()
 	b.MaxRequests = 2
-	first, second = sequence(503, 503, 200), sequence(200)
+	first, second = sequence(503), sequence(503)
 	_, err = c.Do(context.Background(), []Sender{first, second}, b)
 	requireError(t, err, ErrBudget)
 	if first.calls()+second.calls() != 2 {
@@ -71,6 +74,31 @@ func TestRoundRobinComposesBackoffWithSharedBudget(t *testing.T) {
 	requireError(t, err, ErrLatency)
 	if first.calls() != 1 || second.calls() != 0 {
 		t.Fatal("nested strategy reset the latency budget")
+	}
+}
+
+func TestComposedBackoffReachesHealthyNode(t *testing.T) {
+	for _, name := range []string{"round-robin", "circuit-breaker"} {
+		for _, status := range []int{503, 0} {
+			t.Run(fmt.Sprintf("%s/%d", name, status), func(t *testing.T) {
+				synctest.Test(t, func(t *testing.T) {
+					b := limits()
+					b.MaxRequests = 2
+					b.SubrequestLatency = 10 * time.Millisecond
+					first, second := sequence(status), sequence(200)
+					backoff := Backoff{InitialDelay: time.Millisecond}
+					var client MultiClient = RoundRobin{Strategy: backoff}
+					if name == "circuit-breaker" {
+						client = CircuitBreaker{Strategy: backoff, Window: 1, ErrorThreshold: .5, Cooldown: time.Second}
+					}
+					response, err := client.Do(context.Background(), []Sender{first, second}, b)
+					requireSuccess(t, response, err)
+					if first.calls() != 1 || second.calls() != 1 {
+						t.Fatalf("calls=%d,%d", first.calls(), second.calls())
+					}
+				})
+			})
+		}
 	}
 }
 

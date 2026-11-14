@@ -50,10 +50,16 @@ func (e *HTTPError) Error() string {
 
 type requestState struct {
 	budget   Budget
+	next     func(context.Context) (target, error)
 	requests int
 	fast     int
 	failures int
 	timeouts int
+}
+
+type target struct {
+	sender Sender
+	done   func(bool)
 }
 
 type stateKey struct{}
@@ -114,7 +120,7 @@ func (s *requestState) retry(err error) error {
 
 type Default struct{}
 
-func (Default) Do(ctx context.Context, sender Sender, b Budget) (Response, error) {
+func (Default) Do(ctx context.Context, sender Sender, b Budget) (response Response, err error) {
 	ctx, state, cancel, err := begin(ctx, b)
 	if err != nil {
 		return Response{}, err
@@ -123,8 +129,18 @@ func (Default) Do(ctx context.Context, sender Sender, b Budget) (Response, error
 	if ctx.Err() != nil {
 		return Response{}, contextError(ctx)
 	}
+	chosen := target{sender: sender}
+	if state.next != nil {
+		chosen, err = state.next(ctx)
+		if err != nil {
+			return Response{}, err
+		}
+	}
 	if err := state.acquire(); err != nil {
 		return Response{}, err
+	}
+	if chosen.done != nil {
+		defer func() { chosen.done(err != nil) }()
 	}
 	callCtx, stop := context.WithCancel(ctx)
 	defer stop()
@@ -135,7 +151,7 @@ func (Default) Do(ctx context.Context, sender Sender, b Budget) (Response, error
 	done := make(chan result, 1)
 	started := time.Now()
 	go func() {
-		response, err := sender.Send(callCtx)
+		response, err := chosen.sender.Send(callCtx)
 		done <- result{response, err}
 	}()
 	timer := time.NewTimer(state.budget.SubrequestLatency)
